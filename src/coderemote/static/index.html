@@ -47,6 +47,17 @@
   input { flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 8px;
           border: 1px solid var(--line); background: var(--card); color: var(--text); }
   .error { color: var(--bad); }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+          word-break: break-all; margin-top: 4px; }
+  .toggle { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .folders li { padding: 0; }
+  .folders a { display: flex; justify-content: space-between; align-items: center; gap: 10px; width: 100%;
+               padding: 9px 2px; color: var(--text); text-decoration: none; }
+  .folders a:hover { color: var(--accent); }
+  .tag { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line);
+         border-radius: 6px; padding: 1px 6px; }
+  .empty { color: var(--muted); padding: 10px 0; }
 </style>
 </head>
 <body>
@@ -57,6 +68,21 @@
   </header>
   <p class="platform muted" id="platform">Checking this machine…</p>
   <div id="tools"></div>
+  <section id="browser" class="card" hidden>
+    <div class="card-head">
+      <h2>Folders</h2>
+      <label class="toggle"><input id="show-hidden" type="checkbox"> Show hidden</label>
+    </div>
+    <div id="current" class="path"></div>
+    <p id="root-note" class="notes"></p>
+    <div class="row">
+      <button id="up" type="button">Up</button>
+      <button id="go-root" type="button">Projects folder</button>
+      <button id="set-root" type="button">Use as projects folder</button>
+    </div>
+    <p id="fs-error" class="error" hidden></p>
+    <ul id="entries" class="folders"></ul>
+  </section>
   <div id="login" class="card" hidden>
     <h2>Enter your access token</h2>
     <p class="detail">The daemon printed a link with the token when it started. It is also saved in the
@@ -71,6 +97,7 @@
 const KEY = "coderemote.token";
 let memToken = null; // used when localStorage is unavailable
 const $ = (id) => document.getElementById(id);
+const state = { path: null, parent: null, root: null };
 
 function getToken() {
   const m = location.hash.match(/token=([^&]+)/);
@@ -81,6 +108,26 @@ function getToken() {
     return memToken;
   }
   try { return localStorage.getItem(KEY) || memToken; } catch (e) { return memToken; }
+}
+
+class Unauthorized extends Error {}
+
+// Calls the API with the token; throws Unauthorized on 401 and Error(detail) on other failures.
+async function api(path, options = {}) {
+  const token = getToken();
+  if (!token) throw new Unauthorized();
+  const res = await fetch(path, {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 401) {
+    memToken = null;
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    throw new Unauthorized();
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `Request failed (${res.status})`);
+  return body;
 }
 
 function esc(s) {
@@ -101,30 +148,89 @@ function renderTool(t) {
   const notes = (t.notes || []).map((n) => `<p class="notes">${esc(n)}</p>`).join("");
   return `<section class="card"><div class="card-head"><div><h2>${esc(t.name)}</h2>` +
          `<div class="meta muted">${meta}</div></div>` +
-         `<span class="badge ${t.verdict}">${VERDICT[t.verdict] ?? t.verdict}</span></div>` +
+         `<span class="badge ${esc(t.verdict)}">${esc(VERDICT[t.verdict] ?? t.verdict)}</span></div>` +
          `<ul>${checks}</ul>${notes}</section>`;
 }
 
+function renderRootNote() {
+  const r = state.root;
+  $("root-note").textContent = !r ? "" : r.source === "saved"
+    ? `Projects folder: ${r.path}`
+    : `Projects folder (best guess): ${r.path}. Open the right one and tap "Use as projects folder".`;
+}
+
+// Folder names come from disk, so build the list with DOM methods, never innerHTML.
+function renderFolder(data) {
+  state.path = data.path;
+  state.parent = data.parent;
+  $("current").textContent = data.path;
+  $("up").disabled = !data.parent;
+  $("set-root").disabled = !!state.root && state.root.path === data.path;
+  const list = $("entries");
+  list.replaceChildren();
+  if (!data.entries.length) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "No folders here.";
+    list.append(li);
+  }
+  for (const entry of data.entries) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = "#";
+    a.dataset.path = entry.path;
+    const name = document.createElement("span");
+    name.textContent = entry.name;
+    a.append(name);
+    if (entry.git) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "git";
+      a.append(tag);
+    }
+    li.append(a);
+    list.append(li);
+  }
+  if (data.truncated) {
+    const li = document.createElement("li");
+    li.className = "empty";
+    li.textContent = "Only the first 1000 folders are shown.";
+    list.append(li);
+  }
+}
+
+async function browse(path) {
+  $("fs-error").hidden = true;
+  const params = new URLSearchParams();
+  if (path) params.set("path", path);
+  if ($("show-hidden").checked) params.set("hidden", "true");
+  try {
+    renderFolder(await api(`/api/fs?${params}`));
+  } catch (e) {
+    if (e instanceof Unauthorized) return showLogin("That token was not accepted.");
+    $("fs-error").textContent = e.message;
+    $("fs-error").hidden = false;
+  }
+}
+
 async function load(refresh = false) {
-  const token = getToken();
-  if (!token) { showLogin(); return; }
+  if (!getToken()) { showLogin(); return; }
   $("refresh").disabled = true;
   try {
-    const res = await fetch(`/api/status${refresh ? "?refresh=true" : ""}`,
-                            { headers: { Authorization: `Bearer ${token}` } });
-    if (res.status === 401) {
-      memToken = null;
-      try { localStorage.removeItem(KEY); } catch (e) {}
-      showLogin("That token was not accepted.");
-      return;
-    }
-    const data = await res.json();
+    const data = await api(`/api/status${refresh ? "?refresh=true" : ""}`);
     const p = data.platform;
-    $("platform").textContent = `${p.hostname} · ${p.label} ${p.release} · ${p.machine}`;
+    $("platform").textContent = `${p.hostname} · ${p.label} · ${p.machine}`;
     $("tools").innerHTML = renderTool(data.tools.claude) + renderTool(data.tools.codex);
     $("login").hidden = true;
     $("refresh").hidden = false;
+    if (!refresh) {
+      state.root = (await api("/api/settings")).projects_root;
+      renderRootNote();
+      $("browser").hidden = false;
+      await browse(state.root.path);
+    }
   } catch (e) {
+    if (e instanceof Unauthorized) return showLogin("That token was not accepted.");
     $("platform").innerHTML = `<span class="error">Could not reach the daemon.</span>`;
   } finally {
     $("refresh").disabled = false;
@@ -134,6 +240,7 @@ async function load(refresh = false) {
 function showLogin(message) {
   $("platform").innerHTML = message ? `<span class="error">${esc(message)}</span>` : "";
   $("tools").innerHTML = "";
+  $("browser").hidden = true;
   $("refresh").hidden = true;
   $("login").hidden = false;
 }
@@ -148,6 +255,31 @@ $("token-form").addEventListener("submit", (e) => {
   load();
 });
 $("refresh").addEventListener("click", () => load(true));
+$("entries").addEventListener("click", (e) => {
+  const a = e.target.closest("a[data-path]");
+  if (!a) return;
+  e.preventDefault();
+  browse(a.dataset.path);
+});
+$("up").addEventListener("click", () => state.parent && browse(state.parent));
+$("go-root").addEventListener("click", () => state.root && browse(state.root.path));
+$("show-hidden").addEventListener("change", () => browse(state.path));
+$("set-root").addEventListener("click", async () => {
+  try {
+    const res = await api("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projects_root: state.path }),
+    });
+    state.root = res.projects_root;
+    renderRootNote();
+    $("set-root").disabled = true;
+  } catch (e) {
+    if (e instanceof Unauthorized) return showLogin("That token was not accepted.");
+    $("fs-error").textContent = e.message;
+    $("fs-error").hidden = false;
+  }
+});
 load();
 </script>
 </body>

@@ -10,7 +10,10 @@ uv run coderemote            # listens on 127.0.0.1:8765
 
 It prints a link with an access token (`http://127.0.0.1:8765/#token=…`). Open it and the
 page shows which platform you're on and whether Claude Code and Codex are ready for remote
-control. The token is stored in `~/.config/coderemote/token` (macOS: `~/Library/Application
+control. Below that you can browse the machine's folders, starting from your projects
+folder. CodeRemote guesses it (e.g. `~/projects`, `~/code`, `~/src`) and falls back to your
+home folder; open the right one and tap **Use as projects folder** to save it. The token is
+stored in `~/.config/coderemote/token` (macOS: `~/Library/Application
 Support/coderemote`, Windows: `%APPDATA%\coderemote`).
 
 Options: `--host` / `CODEREMOTE_HOST`, `--port` / `CODEREMOTE_PORT`. It only listens on this
