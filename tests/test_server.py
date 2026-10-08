@@ -38,6 +38,7 @@ def test_status_with_token():
     assert res.status_code == 200
     body = res.json()
     assert body["tools"]["claude"]["verdict"] == "ready"
+    assert body["attention"] == []
     assert "label" in body["platform"]
 
 

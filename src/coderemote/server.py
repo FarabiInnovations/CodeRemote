@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from coderemote import __version__, folders, platform_info, settings
-from coderemote.readiness import StatusCache
+from coderemote.readiness import StatusCache, attention
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -42,10 +42,12 @@ def create_app(token: str, cache: StatusCache | None = None) -> FastAPI:
 
     @api.get("/status")
     def status(refresh: bool = False) -> dict:
+        tools = status_cache.get(refresh=refresh)
         return {
             "version": __version__,
             "platform": platform_info.detect(),
-            "tools": status_cache.get(refresh=refresh),
+            "tools": tools,
+            "attention": attention(tools),
         }
 
     @api.get("/fs")

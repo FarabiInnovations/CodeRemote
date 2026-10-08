@@ -58,6 +58,15 @@
   .tag { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line);
          border-radius: 6px; padding: 1px 6px; }
   .empty { color: var(--muted); padding: 10px 0; }
+  .attention { border-color: var(--warn); background: var(--warn-bg); }
+  .attention h2 { color: var(--warn); }
+  .attention li { border-top-color: rgba(127,127,127,.25); }
+  .fix { font-size: 13px; margin-top: 4px; }
+  .cmd { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 6px 8px;
+              border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
+              font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .cmd button { padding: 4px 10px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -67,6 +76,11 @@
     <button id="refresh" type="button" hidden>Check again</button>
   </header>
   <p class="platform muted" id="platform">Checking this machine…</p>
+  <section id="attention" class="card attention" hidden>
+    <h2>Needs your attention</h2>
+    <p class="detail">Run these on the machine (over SSH, for example), then come back to this page.</p>
+    <ul id="attention-list"></ul>
+  </section>
   <div id="tools"></div>
   <section id="browser" class="card" hidden>
     <div class="card-head">
@@ -98,6 +112,7 @@ const KEY = "coderemote.token";
 let memToken = null; // used when localStorage is unavailable
 const $ = (id) => document.getElementById(id);
 const state = { path: null, parent: null, root: null };
+let lastLoad = 0;
 
 function getToken() {
   const m = location.hash.match(/token=([^&]+)/);
@@ -136,15 +151,33 @@ function esc(s) {
 
 const VERDICT = { ready: "Ready", not_ready: "Not ready", missing: "Not installed", unknown: "Can't tell" };
 
+function renderFix(fix) {
+  if (!fix) return "";
+  const cmd = fix.command
+    ? `<div class="cmd"><code>${esc(fix.command)}</code><button type="button" class="copy">Copy</button></div>`
+    : "";
+  return `<div class="fix">${esc(fix.text)}</div>${cmd}`;
+}
+
+function renderAttention(items) {
+  $("attention").hidden = !items.length;
+  $("attention-list").innerHTML = items.map((i) =>
+    `<li><span class="icon ${i.certain ? "no" : "maybe"}">${i.certain ? "✕" : "?"}</span><div>` +
+    `<strong>${esc(i.name)}</strong>: ${esc(i.problem)}` +
+    (i.detail ? ` <span class="detail">(${esc(i.detail)})</span>` : "") +
+    renderFix(i.fix) + `</div></li>`).join("");
+}
+
 function renderTool(t) {
   const checks = t.installed
     ? t.checks.map((c) => {
         const [cls, icon] = c.ok === true ? ["yes", "✓"] : c.ok === false ? ["no", "✕"] : ["maybe", "?"];
         return `<li><span class="icon ${cls}">${icon}</span><div>${esc(c.label)}` +
-               (c.detail ? `<div class="detail">${esc(c.detail)}</div>` : "") + `</div></li>`;
+               (c.detail ? `<div class="detail">${esc(c.detail)}</div>` : "") + renderFix(c.fix) + `</div></li>`;
       }).join("")
-    : `<li><span class="icon no">✕</span><div>Not found on PATH</div></li>`;
-  const meta = t.installed ? `v${esc(t.version ?? "?")} · ${esc(t.path)}` : "";
+    : `<li><span class="icon no">✕</span><div>Not found on this machine${renderFix(t.fix)}</div></li>`;
+  const how = t.install ? ` · ${esc(t.install.label)}` : "";
+  const meta = t.installed ? `v${esc(t.version ?? "?")}${how} · ${esc(t.path)}` : "";
   const notes = (t.notes || []).map((n) => `<p class="notes">${esc(n)}</p>`).join("");
   return `<section class="card"><div class="card-head"><div><h2>${esc(t.name)}</h2>` +
          `<div class="meta muted">${meta}</div></div>` +
@@ -220,7 +253,9 @@ async function load(refresh = false) {
     const data = await api(`/api/status${refresh ? "?refresh=true" : ""}`);
     const p = data.platform;
     $("platform").textContent = `${p.hostname} · ${p.label} · ${p.machine}`;
+    renderAttention(data.attention || []);
     $("tools").innerHTML = renderTool(data.tools.claude) + renderTool(data.tools.codex);
+    lastLoad = Date.now();
     $("login").hidden = true;
     $("refresh").hidden = false;
     if (!refresh) {
@@ -240,6 +275,7 @@ async function load(refresh = false) {
 function showLogin(message) {
   $("platform").innerHTML = message ? `<span class="error">${esc(message)}</span>` : "";
   $("tools").innerHTML = "";
+  $("attention").hidden = true;
   $("browser").hidden = true;
   $("refresh").hidden = true;
   $("login").hidden = false;
@@ -255,6 +291,28 @@ $("token-form").addEventListener("submit", (e) => {
   load();
 });
 $("refresh").addEventListener("click", () => load(true));
+// Copy buttons next to fix commands. Clipboard access needs https or localhost,
+// so fall back to selecting the text for a manual copy.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button.copy");
+  if (!btn) return;
+  const code = btn.parentElement.querySelector("code");
+  try {
+    await navigator.clipboard.writeText(code.textContent);
+    btn.textContent = "Copied";
+    setTimeout(() => { btn.textContent = "Copy"; }, 1500);
+  } catch (err) {
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+});
+// Coming back to the page (e.g. after fixing something over SSH) re-checks the tools.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && lastLoad && Date.now() - lastLoad > 30000) load(true);
+});
 $("entries").addEventListener("click", (e) => {
   const a = e.target.closest("a[data-path]");
   if (!a) return;
