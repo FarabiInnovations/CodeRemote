@@ -10,7 +10,8 @@ from coderemote.server import create_app
 
 class FakeCache:
     def get(self, refresh=False):
-        return {"claude": {"verdict": "ready"}, "codex": {"verdict": "missing"}}
+        return {"claude": {"verdict": "ready", "installed": True, "path": "/fake/claude"},
+                "codex": {"verdict": "missing", "installed": False, "path": None}}
 
 
 AUTH = {"Authorization": "Bearer secret-token"}
@@ -25,6 +26,7 @@ def client():
     ("GET", "/api/fs"),
     ("GET", "/api/settings"),
     ("PUT", "/api/settings"),
+    ("POST", "/api/launch"),
 ])
 def test_every_api_route_requires_token(method, path):
     # A 404 here would mean the static mount is swallowing the route.
@@ -95,3 +97,77 @@ def test_saved_root_that_disappears_falls_back_to_guess(tmp_path):
     c.put("/api/settings", json={"projects_root": str(gone)}, headers=AUTH)
     gone.rmdir()
     assert c.get("/api/settings", headers=AUTH).json()["projects_root"]["source"] == "guessed"
+
+
+# ---- launching ---------------------------------------------------------------------------
+
+from coderemote import claude_config, launcher  # noqa: E402
+
+
+@pytest.fixture
+def fake_launch(monkeypatch):
+    calls = []
+    outcomes = []
+
+    def launch(tool, binary, folder, timeout=20.0):
+        calls.append((tool, binary, folder))
+        return dict(outcomes.pop(0) if outcomes else {"status": "connected", "url": "https://claude.ai/code?environment=env_x"})
+
+    monkeypatch.setattr(launcher, "launch", launch)
+    return calls, outcomes
+
+
+def test_launch_connected_records_recent(tmp_path, fake_launch):
+    calls, _ = fake_launch
+    c = client()
+    res = c.post("/api/launch", json={"tool": "claude", "path": str(tmp_path)}, headers=AUTH)
+    assert res.status_code == 200 and res.json()["status"] == "connected"
+    assert calls == [("claude", "/fake/claude", str(tmp_path.resolve()))]
+    assert c.get("/api/settings", headers=AUTH).json()["recent"] == [str(tmp_path.resolve())]
+
+
+def test_launch_failure_is_not_recorded(tmp_path, fake_launch):
+    _, outcomes = fake_launch
+    outcomes.append({"status": "failed", "message": "nope"})
+    c = client()
+    assert c.post("/api/launch", json={"tool": "claude", "path": str(tmp_path)}, headers=AUTH).json()["status"] == "failed"
+    assert c.get("/api/settings", headers=AUTH).json()["recent"] == []
+
+
+def test_launch_untrusted_then_trust_and_start(tmp_path, fake_launch, monkeypatch):
+    calls, outcomes = fake_launch
+    trusted = []
+    monkeypatch.setattr(claude_config, "trust", lambda folder: trusted.append(folder))
+    outcomes.append({"status": "untrusted", "message": "not trusted"})
+    c = client()
+    first = c.post("/api/launch", json={"tool": "claude", "path": str(tmp_path)}, headers=AUTH).json()
+    assert first["status"] == "untrusted" and first["trust_refused"] is None
+    assert trusted == []  # nothing written without the user's say-so
+    second = c.post("/api/launch", json={"tool": "claude", "path": str(tmp_path), "trust": True}, headers=AUTH).json()
+    assert second["status"] == "connected"
+    assert trusted == [str(tmp_path.resolve())]
+
+
+def test_trust_lost_to_a_racing_writer_is_retried_once(tmp_path, fake_launch, monkeypatch):
+    calls, outcomes = fake_launch
+    monkeypatch.setattr(claude_config, "trust", lambda folder: None)
+    outcomes += [{"status": "untrusted", "message": "x"}, {"status": "untrusted", "message": "x"}]
+    res = client().post("/api/launch", json={"tool": "claude", "path": str(tmp_path), "trust": True}, headers=AUTH)
+    assert res.json()["status"] == "untrusted"
+    assert len(calls) == 2
+
+
+def test_trust_refusal_is_a_clear_error(tmp_path, fake_launch, monkeypatch):
+    def refuse(folder):
+        raise claude_config.TrustError("Pick a project folder instead.")
+    monkeypatch.setattr(claude_config, "trust", refuse)
+    res = client().post("/api/launch", json={"tool": "claude", "path": str(tmp_path), "trust": True}, headers=AUTH)
+    assert res.status_code == 400 and "project folder" in res.json()["detail"]
+
+
+def test_launch_rejects_missing_tool_bad_tool_and_bad_folder(tmp_path, fake_launch):
+    c = client()
+    assert c.post("/api/launch", json={"tool": "codex", "path": str(tmp_path)}, headers=AUTH).status_code == 400
+    assert c.post("/api/launch", json={"tool": "bash", "path": str(tmp_path)}, headers=AUTH).status_code == 422
+    assert c.post("/api/launch", json={"tool": "claude", "path": str(tmp_path / "nope")}, headers=AUTH).status_code == 404
+    assert fake_launch[0] == []

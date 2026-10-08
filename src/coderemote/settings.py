@@ -36,3 +36,19 @@ def save(values: dict, directory: Path | None = None) -> dict:
         Path(tmp).unlink(missing_ok=True)
         raise
     return data
+
+
+RECENT_LIMIT = 5
+
+
+def add_recent(folder: str, directory: Path | None = None) -> list[str]:
+    """Put `folder` first in the recent list (no duplicates, at most RECENT_LIMIT)."""
+    recent = [p for p in load(directory).get("recent", []) if isinstance(p, str) and p != folder]
+    recent = [folder, *recent][:RECENT_LIMIT]
+    save({"recent": recent}, directory)
+    return recent
+
+
+def recent(directory: Path | None = None) -> list[str]:
+    """Recent folders that still exist."""
+    return [p for p in load(directory).get("recent", []) if isinstance(p, str) and Path(p).is_dir()]

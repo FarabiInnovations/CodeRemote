@@ -249,7 +249,7 @@ def attention(tools: dict) -> list[dict]:
     for t in tools.values():
         if not t.get("installed"):
             continue
-        for c in t["checks"]:
+        for c in t.get("checks", []):
             if c["ok"] is not True:
                 items.append({"tool": t["tool"], "name": t["name"], "problem": c["label"],
                               "detail": c["detail"], "certain": c["ok"] is False, "fix": c["fix"]})

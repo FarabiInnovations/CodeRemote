@@ -67,6 +67,18 @@
               border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
               font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   .cmd button { padding: 4px 10px; font-size: 13px; }
+  button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+  .section-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+                   letter-spacing: .04em; margin: 14px 0 0; }
+  .result { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); }
+  .result.good { border-color: var(--ok); background: var(--ok-bg); }
+  .result.bad { border-color: var(--bad); background: var(--bad-bg); }
+  .result.ask { border-color: var(--warn); background: var(--warn-bg); }
+  .result p { margin: 0 0 8px; }
+  .result p:last-child { margin-bottom: 0; }
+  .result a { color: var(--accent); word-break: break-all; }
+  .result pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; margin: 8px 0 0;
+                max-height: 240px; overflow: auto; }
 </style>
 </head>
 <body>
@@ -87,7 +99,18 @@
       <h2>Folders</h2>
       <label class="toggle"><input id="show-hidden" type="checkbox"> Show hidden</label>
     </div>
+    <div id="recent-wrap" hidden>
+      <p class="section-label">Recent</p>
+      <ul id="recent" class="folders"></ul>
+      <p class="section-label">Browse</p>
+    </div>
     <div id="current" class="path"></div>
+    <div class="row">
+      <button id="start-claude" type="button" class="primary">Start Claude here</button>
+      <button id="start-codex" type="button" class="primary">Start Codex here</button>
+    </div>
+    <p id="start-hint" class="detail"></p>
+    <div id="launch-result" class="result" hidden></div>
     <p id="root-note" class="notes"></p>
     <div class="row">
       <button id="up" type="button">Up</button>
@@ -111,7 +134,7 @@
 const KEY = "coderemote.token";
 let memToken = null; // used when localStorage is unavailable
 const $ = (id) => document.getElementById(id);
-const state = { path: null, parent: null, root: null };
+const state = { path: null, parent: null, root: null, tools: {}, attention: [], recent: [] };
 let lastLoad = 0;
 
 function getToken() {
@@ -199,6 +222,8 @@ function renderFolder(data) {
   $("current").textContent = data.path;
   $("up").disabled = !data.parent;
   $("set-root").disabled = !!state.root && state.root.path === data.path;
+  $("launch-result").hidden = true;
+  renderStartButtons();
   const list = $("entries");
   list.replaceChildren();
   if (!data.entries.length) {
@@ -207,28 +232,144 @@ function renderFolder(data) {
     li.textContent = "No folders here.";
     list.append(li);
   }
-  for (const entry of data.entries) {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = "#";
-    a.dataset.path = entry.path;
-    const name = document.createElement("span");
-    name.textContent = entry.name;
-    a.append(name);
-    if (entry.git) {
-      const tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = "git";
-      a.append(tag);
-    }
-    li.append(a);
-    list.append(li);
-  }
+  for (const entry of data.entries) list.append(folderLink(entry.path, entry.name, entry.git ? "git" : ""));
   if (data.truncated) {
     const li = document.createElement("li");
     li.className = "empty";
     li.textContent = "Only the first 1000 folders are shown.";
     list.append(li);
+  }
+}
+
+function folderLink(path, label, tagText) {
+  const li = document.createElement("li");
+  const a = document.createElement("a");
+  a.href = "#";
+  a.dataset.path = path;
+  const name = document.createElement("span");
+  name.textContent = label;
+  a.append(name);
+  if (tagText) {
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = tagText;
+    a.append(tag);
+  }
+  li.append(a);
+  return li;
+}
+
+function renderRecent(paths) {
+  state.recent = paths;
+  $("recent-wrap").hidden = !paths.length;
+  $("recent").replaceChildren(...paths.map((p) => folderLink(p, p.split(/[\\/]/).filter(Boolean).pop() || p, p)));
+}
+
+const TOOL_NAMES = { claude: "Claude", codex: "Codex" };
+
+// Why a tool can't be started right now, or null when it can.
+function blockedReason(tool) {
+  const t = state.tools[tool];
+  if (!t) return "Still checking…";
+  if (!t.installed) return `${TOOL_NAMES[tool]} isn't installed on this machine.`;
+  if (state.attention.some((i) => i.tool === tool && i.certain)) {
+    return `${TOOL_NAMES[tool]} needs your attention first (see above).`;
+  }
+  return null;
+}
+
+function renderStartButtons() {
+  const hints = [];
+  for (const tool of ["claude", "codex"]) {
+    const reason = blockedReason(tool);
+    $(`start-${tool}`).disabled = !!reason || !state.path || launching;
+    if (reason && state.tools[tool]) hints.push(reason);
+  }
+  $("start-hint").textContent = hints.join(" ");
+}
+
+let launching = false;
+
+function showResult(kind, build) {
+  const box = $("launch-result");
+  box.className = `result ${kind}`;
+  box.replaceChildren();
+  build(box);
+  box.hidden = false;
+}
+
+function para(text) {
+  const p = document.createElement("p");
+  p.textContent = text;
+  return p;
+}
+
+async function startSession(tool, trust = false) {
+  const folder = state.path;
+  launching = true;
+  renderStartButtons();
+  showResult("", (box) => box.append(para(`Starting ${TOOL_NAMES[tool]} in ${folder}…`)));
+  try {
+    const r = await api("/api/launch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tool, path: folder, trust }),
+    });
+    if (r.status === "connected" || r.status === "started") {
+      showResult(r.status === "connected" ? "good" : "", (box) => {
+        box.append(para(r.message));
+        if (r.url && r.url.startsWith("https://claude.ai/")) {
+          const p = document.createElement("p");
+          const a = document.createElement("a");
+          a.href = r.url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = "Open the session";
+          p.append(a);
+          box.append(p);
+        }
+      });
+      renderRecent([folder, ...state.recent.filter((p) => p !== folder)].slice(0, 5));
+    } else if (r.status === "untrusted") {
+      showResult(r.trust_refused ? "bad" : "ask", (box) => {
+        box.append(para(r.message));
+        if (r.trust_refused) { box.append(para(r.trust_refused)); return; }
+        box.append(para("Trusting it lets Claude read files and run commands in this folder, " +
+                        "the same as accepting the prompt in a terminal."));
+        const row = document.createElement("div");
+        row.className = "row";
+        const yes = document.createElement("button");
+        yes.type = "button";
+        yes.className = "primary";
+        yes.textContent = "Trust and start";
+        yes.addEventListener("click", () => startSession(tool, true));
+        const no = document.createElement("button");
+        no.type = "button";
+        no.textContent = "Cancel";
+        no.addEventListener("click", () => { $("launch-result").hidden = true; });
+        row.append(yes, no);
+        box.append(row);
+      });
+    } else {
+      showResult("bad", (box) => {
+        box.append(para(r.message || "It didn't start."));
+        if (r.log_tail) {
+          const details = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.textContent = "Output";
+          const pre = document.createElement("pre");
+          pre.textContent = r.log_tail;
+          details.append(summary, pre);
+          box.append(details);
+        }
+      });
+    }
+  } catch (e) {
+    if (e instanceof Unauthorized) return showLogin("That token was not accepted.");
+    showResult("bad", (box) => box.append(para(e.message)));
+  } finally {
+    launching = false;
+    renderStartButtons();
   }
 }
 
@@ -253,13 +394,18 @@ async function load(refresh = false) {
     const data = await api(`/api/status${refresh ? "?refresh=true" : ""}`);
     const p = data.platform;
     $("platform").textContent = `${p.hostname} · ${p.label} · ${p.machine}`;
-    renderAttention(data.attention || []);
+    state.tools = data.tools;
+    state.attention = data.attention || [];
+    renderAttention(state.attention);
+    renderStartButtons();
     $("tools").innerHTML = renderTool(data.tools.claude) + renderTool(data.tools.codex);
     lastLoad = Date.now();
     $("login").hidden = true;
     $("refresh").hidden = false;
     if (!refresh) {
-      state.root = (await api("/api/settings")).projects_root;
+      const settings = await api("/api/settings");
+      state.root = settings.projects_root;
+      renderRecent(settings.recent || []);
       renderRootNote();
       $("browser").hidden = false;
       await browse(state.root.path);
@@ -313,12 +459,16 @@ document.addEventListener("click", async (e) => {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && lastLoad && Date.now() - lastLoad > 30000) load(true);
 });
-$("entries").addEventListener("click", (e) => {
-  const a = e.target.closest("a[data-path]");
-  if (!a) return;
-  e.preventDefault();
-  browse(a.dataset.path);
-});
+for (const id of ["entries", "recent"]) {
+  $(id).addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-path]");
+    if (!a) return;
+    e.preventDefault();
+    browse(a.dataset.path);
+  });
+}
+$("start-claude").addEventListener("click", () => startSession("claude"));
+$("start-codex").addEventListener("click", () => startSession("codex"));
 $("up").addEventListener("click", () => state.parent && browse(state.parent));
 $("go-root").addEventListener("click", () => state.root && browse(state.root.path));
 $("show-hidden").addEventListener("change", () => browse(state.path));
@@ -330,6 +480,7 @@ $("set-root").addEventListener("click", async () => {
       body: JSON.stringify({ projects_root: state.path }),
     });
     state.root = res.projects_root;
+    renderRecent(res.recent || []);
     renderRootNote();
     $("set-root").disabled = true;
   } catch (e) {
