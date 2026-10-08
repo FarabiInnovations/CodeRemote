@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeRemote</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1c1c1a; --muted: #6b6b66; --line: #e3e3de;
+    --ok: #1f7a4d; --ok-bg: #e4f3ea; --bad: #b3261e; --bad-bg: #fbe9e7;
+    --warn: #8a5a00; --warn-bg: #fdf1d8; --accent: #2f5bd3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --card: #1e1e1c; --text: #ececea; --muted: #9a9a94; --line: #2e2e2b;
+      --ok: #6fd39e; --ok-bg: #173325; --bad: #ff8a80; --bad-bg: #3a1c1a;
+      --warn: #f2c25b; --warn-bg: #3a2e14; --accent: #8aa8ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 22px; margin: 0; }
+  .muted { color: var(--muted); }
+  .platform { margin: 6px 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 16px; margin-bottom: 14px; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .card h2 { font-size: 17px; margin: 0; }
+  .meta { font-size: 13px; margin-top: 2px; word-break: break-all; }
+  .badge { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+  .ready { color: var(--ok); background: var(--ok-bg); }
+  .not_ready, .missing { color: var(--bad); background: var(--bad-bg); }
+  .unknown { color: var(--warn); background: var(--warn-bg); }
+  ul { list-style: none; padding: 0; margin: 12px 0 0; }
+  li { display: flex; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+  li .icon { width: 18px; flex: none; text-align: center; font-weight: 700; }
+  li .yes { color: var(--ok); } li .no { color: var(--bad); } li .maybe { color: var(--warn); }
+  .detail { font-size: 13px; color: var(--muted); }
+  .notes { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  button { font: inherit; color: var(--accent); background: none; border: 1px solid var(--line);
+           border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input { flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 8px;
+          border: 1px solid var(--line); background: var(--card); color: var(--text); }
+  .error { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>CodeRemote</h1>
+    <button id="refresh" type="button" hidden>Check again</button>
+  </header>
+  <p class="platform muted" id="platform">Checking this machine…</p>
+  <div id="tools"></div>
+  <div id="login" class="card" hidden>
+    <h2>Enter your access token</h2>
+    <p class="detail">The daemon printed a link with the token when it started. It is also saved in the
+      <code>token</code> file in the CodeRemote settings folder.</p>
+    <form id="token-form">
+      <input id="token-input" type="password" autocomplete="off" placeholder="Token">
+      <button type="submit">Connect</button>
+    </form>
+  </div>
+</main>
+<script>
+const KEY = "coderemote.token";
+let memToken = null; // used when localStorage is unavailable
+const $ = (id) => document.getElementById(id);
+
+function getToken() {
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) {
+    try { localStorage.setItem(KEY, decodeURIComponent(m[1])); } catch (e) {}
+    history.replaceState(null, "", location.pathname);
+    memToken = decodeURIComponent(m[1]);
+    return memToken;
+  }
+  try { return localStorage.getItem(KEY) || memToken; } catch (e) { return memToken; }
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+const VERDICT = { ready: "Ready", not_ready: "Not ready", missing: "Not installed", unknown: "Can't tell" };
+
+function renderTool(t) {
+  const checks = t.installed
+    ? t.checks.map((c) => {
+        const [cls, icon] = c.ok === true ? ["yes", "✓"] : c.ok === false ? ["no", "✕"] : ["maybe", "?"];
+        return `<li><span class="icon ${cls}">${icon}</span><div>${esc(c.label)}` +
+               (c.detail ? `<div class="detail">${esc(c.detail)}</div>` : "") + `</div></li>`;
+      }).join("")
+    : `<li><span class="icon no">✕</span><div>Not found on PATH</div></li>`;
+  const meta = t.installed ? `v${esc(t.version ?? "?")} · ${esc(t.path)}` : "";
+  const notes = (t.notes || []).map((n) => `<p class="notes">${esc(n)}</p>`).join("");
+  return `<section class="card"><div class="card-head"><div><h2>${esc(t.name)}</h2>` +
+         `<div class="meta muted">${meta}</div></div>` +
+         `<span class="badge ${t.verdict}">${VERDICT[t.verdict] ?? t.verdict}</span></div>` +
+         `<ul>${checks}</ul>${notes}</section>`;
+}
+
+async function load(refresh = false) {
+  const token = getToken();
+  if (!token) { showLogin(); return; }
+  $("refresh").disabled = true;
+  try {
+    const res = await fetch(`/api/status${refresh ? "?refresh=true" : ""}`,
+                            { headers: { Authorization: `Bearer ${token}` } });
+    if (res.status === 401) {
+      memToken = null;
+      try { localStorage.removeItem(KEY); } catch (e) {}
+      showLogin("That token was not accepted.");
+      return;
+    }
+    const data = await res.json();
+    const p = data.platform;
+    $("platform").textContent = `${p.hostname} · ${p.label} ${p.release} · ${p.machine}`;
+    $("tools").innerHTML = renderTool(data.tools.claude) + renderTool(data.tools.codex);
+    $("login").hidden = true;
+    $("refresh").hidden = false;
+  } catch (e) {
+    $("platform").innerHTML = `<span class="error">Could not reach the daemon.</span>`;
+  } finally {
+    $("refresh").disabled = false;
+  }
+}
+
+function showLogin(message) {
+  $("platform").innerHTML = message ? `<span class="error">${esc(message)}</span>` : "";
+  $("tools").innerHTML = "";
+  $("refresh").hidden = true;
+  $("login").hidden = false;
+}
+
+$("token-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const v = $("token-input").value.trim();
+  if (!v) return;
+  memToken = v;
+  try { localStorage.setItem(KEY, v); } catch (e) {}
+  $("token-input").value = "";
+  load();
+});
+$("refresh").addEventListener("click", () => load(true));
+load();
+</script>
+</body>
+</html>
